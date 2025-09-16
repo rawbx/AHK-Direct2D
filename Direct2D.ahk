@@ -1,3 +1,22 @@
+/*******************************************************************************
+ * @description
+ * A simple Direct2D wrapper for ahk v2
+ *
+ * Some code are adapted from this project: [Spawnova/ShinsOverlayClass - MIT License](https://github.com/Spawnova/ShinsOverlayClass)
+ *
+ * @link https://github.com/rawbx/AHK-Direct2D
+ * @file Direct2D.ahk
+ * @license MIT
+ * @author rawbx
+ * @version 0.1.3
+ * @example
+ * ui := Gui("-DPIScale")
+ * d2d := Direct2D(ui.Hwnd, 512, 512)
+ * ui.Show("W512 H512")
+ * d2d.BeginDraw()
+ * d2d.DrawSvg('<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" ...</svg>', 10, 10, 128, 128)
+ * d2d.EndDraw()
+ ******************************************************************************/
 class Direct2D {
     __New(target, w?, h?) {
         this.target := target
@@ -616,7 +635,7 @@ class Direct2D {
         NumPut("float", w, srcROI, 8)
         NumPut("float", h, srcROI, 12)
         if pBitmap := this.GetSavedBitmapFromWicBitmap(imgPath)
-            this.ID2D1RenderTarget.DrawBitmap(pBitmap, srcROI, opacity, linear := 1, srcROI)
+            this.ID2D1RenderTarget.DrawBitmap(pBitmap, dstRect, opacity, linear := 1, srcROI)
     }
 
     GetSavedBitmapFromWicBitmap(imgPath) {
