@@ -2,20 +2,20 @@ class Direct2D {
     __New(target, w?, h?) {
         this.target := target
         this.hwnd := target is Gui ? target.Hwnd : (IsInteger(target) && target != 0) ? target : 0
-        this.x := 0, this.y := 0, this.width := w ?? 0, this.height := h ?? 0
+        this.x := 0, this.y := 0, this.width := w ?? 512, this.height := h ?? 512
         this.isDrawing := 0
 
-        gsi := buffer(24, 0), NumPut("uint", 1, gsi, 0)
-        DllCall("gdiplus\GdiplusStartup", "Ptr*", &pToken := 0, "Ptr", gsi, "Ptr*", 0)
-        this.gdipToken := pToken
+        ; to get image bitmap info
+        this.gdipToken := this.GdipStartUp()
 
         this.textFormats := Map()
         this.solidBrushes := Map()
         this.strokeStyles := Map()
         this.d2dBitmaps := Map()
 
-        this.ID2D1RenderTarget := Direct2D.ID2D1RenderTarget(this.hwnd, this.width, this.height)
-        this.ID2D1WICBitmapRenderTarget := Direct2D.ID2D1WicBitmapRenderTarget(w ?? A_ScreenWidth, h ?? A_ScreenHeight)
+        this.ID2D1WICBitmapRenderTarget := Direct2D.ID2D1WicBitmapRenderTarget(this.width, this.height)
+        this.ID2D1RenderTarget := this.hwnd ? Direct2D.ID2D1RenderTarget(this.hwnd, this.width, this.height)
+            : this.ID2D1WICBitmapRenderTarget
 
         this.ID2D1RenderTarget.SetAntiAliasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE := 0)
         this.ID2D1RenderTarget.SetTextAntiAliasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE := 1)
@@ -23,8 +23,6 @@ class Direct2D {
     }
 
     __Delete() {
-        DllCall("gdiplus\GdiplusShutdown", "Ptr*", this.gdipToken)
-
         for _, s in this.solidBrushes
             Direct2D.release(s)
         for _, t in this.textFormats
@@ -32,10 +30,9 @@ class Direct2D {
         for _, st in this.strokeStyles
             Direct2D.release(st)
 
-        Direct2D.release(this.ID2D1RenderTarget)
-        Direct2D.release(this.ID2D1WICBitmapRenderTarget)
         Direct2D.release(Direct2D.IDWriteFactory.Get())
         Direct2D.release(Direct2D.ID2D1Factory.Get())
+        this.GdipShutdown(this.gdipToken)
     }
 
     static isX64 := A_PtrSize == 8
@@ -66,8 +63,6 @@ class Direct2D {
             this.VT_CreateHwndRenderTarget := Direct2D.vTable(pFactory, 14)
             this.VT_CreateDCRenderTarget := Direct2D.vTable(pFactory, 16)
         }
-
-        static __Delete() => Direct2D.release(this.pF)
 
         static Get() => this.pF
 
@@ -208,6 +203,11 @@ class Direct2D {
             return this.pRT
         }
 
+        __Delete() {
+            if this.pRT
+                Direct2D.release(this.pRT)
+        }
+
         __InitCommonVT() { ; ID2D1RenderTarget
             this.VT_CreateBitmap := Direct2D.vTable(this.pRT, 4)
             this.VT_CreateBitmapFromWicBitmap := Direct2D.vTable(this.pRT, 5)
@@ -345,6 +345,13 @@ class Direct2D {
             this.VT_DrawSvgDocument := Direct2D.vTable(this.pRT, 116)
 
             return this.pRT
+        }
+
+        __Delete() {
+            if this.pRT
+                Direct2D.release(this.pRT)
+            if this.pWICBitmap
+                Direct2D.release(this.pWICBitmap)
         }
 
         GetWICBitmap() => this.pWICBitmap
@@ -551,7 +558,7 @@ class Direct2D {
         this.ID2D1RenderTarget.FillEllipse(ellipse, pBrush)
     }
 
-    DrawSvg(svg, width, height) {
+    DrawSvg(svg, x, y, w, h) {
         local IStream := 0
         if FileExist(svg) && RegExReplace(svg, ".*\.(.*)$", "$1") = "svg" {
             DllCall("shlwapi\SHCreateStreamOnFileW", "WStr", svg, "uint", 0, "ptr*", &IStream)
@@ -568,8 +575,8 @@ class Direct2D {
         }
 
         D2D1_SIZE_F := Buffer(8)
-        NumPut("float", width, D2D1_SIZE_F, 0x0)
-        NumPut("float", height, D2D1_SIZE_F, 0x4)
+        NumPut("float", w, D2D1_SIZE_F, 0x0)
+        NumPut("float", h, D2D1_SIZE_F, 0x4)
         pSvgDocument := this.ID2D1WICBitmapRenderTarget.CreateSvgDocument(IStream, NumGet(D2D1_SIZE_F, "uint64"))
         this.ID2D1WICBitmapRenderTarget.BeginDraw()
         this.ID2D1WICBitmapRenderTarget.DrawSvgDocument(pSvgDocument)
@@ -584,22 +591,32 @@ class Direct2D {
         ObjRelease(this.ID2D1WICBitmapRenderTarget.pWICBitmap)
         ObjRelease(pSvgDocument)
 
-        rect := Buffer(16, 0)
-        NumPut("float", 0, rect, 0)
-        NumPut("float", 0, rect, 4)
-        NumPut("float", width, rect, 8)
-        NumPut("float", height, rect, 12)
-        this.ID2D1RenderTarget.DrawBitmap(pD2DBitmap, rect, opacity := 1, linear := 1, rect)
+        dstRect := Buffer(16, 0)
+        NumPut("float", x, dstRect, 0)
+        NumPut("float", y, dstRect, 4)
+        NumPut("float", x + w, dstRect, 8)
+        NumPut("float", y + h, dstRect, 12)
+        srcROI := Buffer(16, 0)
+        NumPut("float", 0, srcROI, 0)
+        NumPut("float", 0, srcROI, 4)
+        NumPut("float", w, srcROI, 8)
+        NumPut("float", h, srcROI, 12)
+        this.ID2D1RenderTarget.DrawBitmap(pD2DBitmap, dstRect, opacity := 1, linear := 1, srcROI)
     }
 
     DrawImage(imgPath, x := 0, y := 0, w := 0, h := 0, opacity := 1) {
-        rect := Buffer(16, 0)
-        NumPut("float", x, rect, 0)
-        NumPut("float", y, rect, 4)
-        NumPut("float", x + w, rect, 8)
-        NumPut("float", y + h, rect, 12)
+        dstRect := Buffer(16, 0)
+        NumPut("float", x, dstRect, 0)
+        NumPut("float", y, dstRect, 4)
+        NumPut("float", x + w, dstRect, 8)
+        NumPut("float", y + h, dstRect, 12)
+        srcROI := Buffer(16, 0)
+        NumPut("float", 0, srcROI, 0)
+        NumPut("float", 0, srcROI, 4)
+        NumPut("float", w, srcROI, 8)
+        NumPut("float", h, srcROI, 12)
         if pBitmap := this.GetSavedBitmapFromWicBitmap(imgPath)
-            this.ID2D1RenderTarget.DrawBitmap(pBitmap, rect, opacity, linear := 1, rect)
+            this.ID2D1RenderTarget.DrawBitmap(pBitmap, srcROI, opacity, linear := 1, srcROI)
     }
 
     GetSavedBitmapFromWicBitmap(imgPath) {
@@ -700,5 +717,20 @@ class Direct2D {
             this.ID2D1RenderTarget.Resize(newSize)
         }
         DllCall("MoveWindow", "Uptr", this.hwnd, "int", x, "int", y, "int", this.width, "int", this.height, "char", 1)
+    }
+
+    GdipStartUp() {
+        if !DllCall("GetModuleHandleW", "Wstr", "gdiplus", "UPtr")
+            DllCall("LoadLibraryW", "Wstr", "gdiplus", "UPtr")
+
+        gdipStartupInput := Buffer(A_PtrSize == 8 ? 24 : 16, 0), NumPut("UInt", Gdip := 1, gdipStartupInput, 0)
+        DllCall("gdiplus\GdiplusStartup", "Ptr*", &pToken := 0, "Ptr", gdipStartupInput, "Ptr", 0)
+        return pToken
+    }
+
+    GdipShutdown(pToken) {
+        DllCall("gdiplus\GdiplusShutdown", "Ptr", pToken)
+        if hModule := DllCall("GetModuleHandleW", "Wstr", "gdiplus", "UPtr")
+            DllCall("FreeLibrary", "Ptr", hModule)
     }
 }
