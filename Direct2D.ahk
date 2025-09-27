@@ -29,6 +29,9 @@ class Direct2D {
         this.drawBounds := Buffer(24, 0) ; for D2D1_RECT D2D1_ROUNDED_RECT D2D1_ELLIPSE
         this.isDrawing := 0
 
+        this.pGradientdStops := 0
+        this.pPathGeometry := 0
+
         if isSet(target)
             this.SetRenderTarget(target)
     }
@@ -40,6 +43,11 @@ class Direct2D {
             Direct2D.release(t)
         for _, st in this.strokeStyles
             Direct2D.release(st)
+
+        if this.pGradientdStops
+            Direct2D.release(this.pGradientdStops), this.pGradientdStops := 0
+        if this.pPathGeometry
+            Direct2D.release(this.pPathGeometry), this.pPathGeometry := 0
 
         Direct2D.release(Direct2D.IDWriteFactory.Get())
         Direct2D.release(Direct2D.ID2D1Factory.Get())
@@ -82,6 +90,7 @@ class Direct2D {
 
             this.pF := pFactory
             this.VT_GetDesktopDpi := Direct2D.vTable(pFactory, 4)
+            this.VT_CreatePathGeometry := Direct2D.vTable(pFactory, 10)
             this.VT_CreateStrokeStyle := Direct2D.vTable(pFactory, 11)
             this.VT_CreateWicBitmapRenderTarget := Direct2D.vTable(pFactory, 13)
             this.VT_CreateHwndRenderTarget := Direct2D.vTable(pFactory, 14)
@@ -92,6 +101,9 @@ class Direct2D {
 
         static GetDesktopDpi() =>
             (DllCall(this.VT_GetDesktopDpi, "ptr", this.pF, 'float*', &dpiX := 0, 'float*', &dpiY := 0, 'uint'), dpiX)
+
+        static CreatePathGeometry() =>
+            (DllCall(this.VT_CreatePathGeometry, "ptr", this.pF, "ptr*", &pPathGeometry := 0), pPathGeometry)
 
         static CreateStrokeStyle(styleProps) =>
             (DllCall(this.VT_CreateStrokeStyle, "ptr", this.pF, "ptr", styleProps, "ptr", 0, "uint", 0, "ptr*", &pStrokeStyle := 0), pStrokeStyle)
@@ -239,13 +251,15 @@ class Direct2D {
             this.VT_CreateGradientStopCollection := Direct2D.vTable(this.pRT, 9)
             this.VT_CreateLinearGradientBrush := Direct2D.vTable(this.pRT, 10)
             this.VT_CreateRadialGradientBrush := Direct2D.vTable(this.pRT, 11)
-            this.VT_DrawLine := Direct2D.vTable(this.pRT, 14)
+            this.VT_DrawLine := Direct2D.vTable(this.pRT, 15)
             this.VT_DrawRectangle := Direct2D.vTable(this.pRT, 16)
             this.VT_FillRectangle := Direct2D.vTable(this.pRT, 17)
             this.VT_DrawRoundedRectangle := Direct2D.vTable(this.pRT, 18)
             this.VT_FillRoundedRectangle := Direct2D.vTable(this.pRT, 19)
             this.VT_DrawEllipse := Direct2D.vTable(this.pRT, 20)
             this.VT_FillEllipse := Direct2D.vTable(this.pRT, 21)
+            this.VT_DrawGeometry := Direct2D.vTable(this.pRT, 22)
+            this.VT_FillGeometry := Direct2D.vTable(this.pRT, 23)
             this.VT_DrawBitmap := Direct2D.vTable(this.pRT, 26)
             this.VT_DrawText := Direct2D.vTable(this.pRT, 27)
             this.VT_DrawTextLayout := Direct2D.vTable(this.pRT, 28)
@@ -336,6 +350,12 @@ class Direct2D {
         FillEllipse(sEllipse, pBrush) =>
             DllCall(this.VT_FillEllipse, "Ptr", this.pRT, "Ptr", sEllipse, "ptr", pBrush)
 
+        DrawGeometry(pGeometry, pBrush, strokeWidth, pStrokeStyle) =>
+            DllCall(this.VT_DrawGeometry, "Ptr", this.pRT, "Ptr", pGeometry, "Ptr", pBrush, "float", strokeWidth, "ptr", pStrokeStyle)
+
+        FillGeometry(pGeometry, pBrush, pOpacityBrush := 0) =>
+            DllCall(this.VT_FillGeometry, "Ptr", this.pRT, "Ptr", pGeometry, "Ptr", pBrush, "Ptr", pOpacityBrush)
+
         DrawBitmap(pBitmap, destRect := 0, opacity := 1, interpolationMode := 1, srcRect := 0) =>
             DllCall(this.VT_DrawBitmap, "ptr", this.pRT,
                 "ptr", pBitmap,
@@ -371,6 +391,67 @@ class Direct2D {
         EndDraw() => DllCall(this.VT_EndDraw, "Ptr", this.pRT, "Ptr*", 0, "Ptr*", 0)
 
         Resize(size) => DllCall(this.VT_Resize, "Ptr", this.pRT, "ptr", size)
+    }
+
+    class ID2D1GeometrySink {
+        static Init() {
+            this.pPathGeometry := Direct2D.ID2D1Factory.CreatePathGeometry()
+            DllCall(VT_Open := Direct2D.vTable(this.pPathGeometry, 17), "Ptr", this.pPathGeometry, "Ptr*", &pGeometrySink := 0)
+            this.pGeometrySink := pGeometrySink
+            if !pGeometrySink {
+                MsgBox("ID2D1GeometrySink init failed")
+                return
+            }
+
+            ; this.VT_SetFillMode := Direct2D.vTable(pGeometrySink, 3)
+            ; D2D1_FILL_MODE_ALTERNATE = 0, D2D1_FILL_MODE_WINDING = 1,
+            ; DllCall(this.VT_SetFillMode, "Ptr", pGeometrySink, "uint", 1)
+            this.VT_BeginFigure := Direct2D.vTable(pGeometrySink, 5)
+            ; this.VT_AddLines := Direct2D.vTable(pGeometrySink, 6)
+            ; this.VT_AddBeziers := Direct2D.vTable(pGeometrySink, 7)
+            this.VT_EndFigure := Direct2D.vTable(pGeometrySink, 8)
+            this.VT_Close := Direct2D.vTable(pGeometrySink, 9)
+            this.VT_AddLine := Direct2D.vTable(pGeometrySink, 10)
+            this.VT_AddBezier := Direct2D.vTable(pGeometrySink, 11)
+            ; this.VT_AddQuadraticBezier := Direct2D.vTable(pGeometrySink, 12)
+            ; this.VT_AddQuadraticBeziers := Direct2D.vTable(pGeometrySink, 13)
+            this.VT_AddArc := Direct2D.vTable(pGeometrySink, 14)
+
+            return pGeometrySink
+        }
+
+        static Get() => this.pGeometrySink
+        static GetPathGeometry() => this.pPathGeometry
+
+        static BeginFigure(pointStart, figureBegin) {
+            if Direct2D.isX64 {
+                static point := Buffer(8)
+                NumPut("float", pointStart[1], point, 0)
+                NumPut("float", pointStart[2], point, 4)
+                DllCall(this.VT_BeginFigure, "Ptr", this.pGeometrySink, "Double", NumGet(point, 0, "double"), "uint", figureBegin)
+            } else {
+                DllCall(this.VT_BeginFigure, "Ptr", this.pGeometrySink, "float", pointStart[1], "float", pointStart[2], "uint", figureBegin)
+            }
+        }
+
+        static EndFigure(figureEnd) => DllCall(this.VT_EndFigure, "Ptr", this.pGeometrySink, "uint", figureEnd)
+
+        static Close() => DllCall(this.VT_Close, "Ptr", this.pGeometrySink, "uint")
+
+        static AddLine(linePoint) {
+            if Direct2D.isX64 {
+                static point := Buffer(8)
+                NumPut("float", linePoint[1], point, 0)
+                NumPut("float", linePoint[2], point, 4)
+                DllCall(this.VT_AddLine, "Ptr", this.pGeometrySink, "Double", NumGet(point, 0, "double"))
+            } else {
+                DllCall(this.VT_AddLine, "Ptr", this.pGeometrySink, "float", linePoint[1], "float", linePoint[2])
+            }
+        }
+
+        static AddBezier(bezier) => DllCall(this.VT_AddBezier, "Ptr", this.pGeometrySink, "Ptr", bezier)
+
+        static AddArc(arc) => DllCall(this.VT_AddArc, "Ptr", this.pGeometrySink, "Ptr", arc)
     }
 
     class ID2D1WicBitmapRenderTarget extends Direct2D.ID2D1RenderTarget {
@@ -495,6 +576,7 @@ class Direct2D {
         __New() {
             static rtProps := Buffer(64, 0)
             NumPut("uint", 87, rtProps, 4) ; DXGI_FORMAT_B8G8R8A8_UNORM
+            NumPut("uint", 1, rtProps, 8) ; AlphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED
             this.pRT := Direct2D.ID2D1Factory.CreateDCRenderTarget(rtProps)
             if !this.pRT {
                 MsgBox("ID2D1DCRenderTarget init failed")
@@ -507,7 +589,7 @@ class Direct2D {
             return this.pRT
         }
 
-        BindDC(rect) => DllCall(this.VT_BindDC, "Ptr", this.pRT, "ptr", rect)
+        BindDC(hDC, rect) => DllCall(this.VT_BindDC, "Ptr", this.pRT, "ptr", hDC, "ptr", rect)
     }
 
     /**
@@ -685,8 +767,8 @@ class Direct2D {
         NumPut("float", startY, this.drawBounds, 4)
         NumPut("float", endX, this.drawBounds, 8)
         NumPut("float", endY, this.drawBounds, 12)
-        pGdStops := this.ID2D1RenderTarget.CreateGradientStopCollection(gdColors)
-        return this.ID2D1RenderTarget.CreateLinearGradientBrush(this.drawBounds, pGdStops)
+        this.pGradientdStops := this.ID2D1RenderTarget.CreateGradientStopCollection(gdColors)
+        return this.ID2D1RenderTarget.CreateLinearGradientBrush(this.drawBounds, this.pGradientdStops)
     }
 
     CreateRadialGradientBrush(centerX, centerY, gdOriginOffsetX, gdOriginOffsetY, radiusX, radiusY, gdColors) {
@@ -696,8 +778,8 @@ class Direct2D {
         NumPut("float", gdOriginOffsetY, this.drawBounds, 12)
         NumPut("float", radiusX, this.drawBounds, 16)
         NumPut("float", radiusY, this.drawBounds, 20)
-        pGdStops := this.ID2D1RenderTarget.CreateGradientStopCollection(gdColors)
-        return this.ID2D1RenderTarget.CreateRadialGradientBrush(this.drawBounds, pGdStops)
+        this.pGradientdStops := this.ID2D1RenderTarget.CreateGradientStopCollection(gdColors)
+        return this.ID2D1RenderTarget.CreateRadialGradientBrush(this.drawBounds, this.pGradientdStops)
     }
 
     /**
@@ -707,9 +789,9 @@ class Direct2D {
      * @param {Integer} fontSize font size
      * @param {Integer} color font color(hex agbr)
      * @param {Integer} fontName font family
-     * @param {Integer} w text box width
-     * @param {Integer} h text box Height
-     * @param {Integer} fontWeight regular: 400, bold: 700
+     * @param {Integer} w text box width, if not set it will use win width
+     * @param {Integer} h text box Height, if not set it will use win height
+     * @param {Integer} fontWeight light 300, regular(normal): 400, medium:500, semiBold:600, bold: 700
      * @param {Integer} fontStyle normal: 0, oblique: 1 italic: 2
      * @param {Integer} horizonAlign DWRITE_TEXT_ALIGNMENT leading(left): 0, trailing(right): 1, center: 2, justified: 3
      * @param {Integer} verticalAlign DWRITE_PARAGRAPH_ALIGNMENT near(top): 0, middle(center): 1, far(right): 2
@@ -753,10 +835,68 @@ class Direct2D {
      * @param {Integer} strokeCapStyle flat(0) square(1) round(2) triangle(3)
      * @param {Integer} strokeShapeStyle solid(0) dash(1) dot(2) dash_dot(3)
      */
-    DrawLine(pointStart, pointEnd, color := 0xFFFFFFFF, strokeWidth := 2, strokeCapStyle := 2, strokeShapeStyle := 0) {
+    DrawLine(pointStart, pointEnd, color, strokeWidth := 2, strokeCapStyle := 2, strokeShapeStyle := 0) {
         pBrush := this.GetSavedOrCreateSolidBrush(color)
         pStrokeStyle := this.GetSavedOrCreateStrokeStyle(strokeCapStyle, strokeShapeStyle)
         this.ID2D1RenderTarget.DrawLine(pointStart, pointEnd, pBrush, strokeWidth, pStrokeStyle)
+    }
+
+    /**
+     * @param {Array}  points [[x1, y1], [x2, y2], [x3, y3]]
+     * @param {Integer} color abgr 0xFFFFFFFF
+     * @param {Boolean} close connect the start point
+     * @param {Integer} strokeWidth thickness for stroke
+     * @param {Integer} strokeCapStyle flat(0) square(1) round(2) triangle(3)
+     * @param {Integer} strokeShapeStyle solid(0) dash(1) dot(2) dash_dot(3)
+     */
+    DrawLines(points, color, close := 0, strokeWidth := 2, strokeCapStyle := 2, strokeShapeStyle := 0) {
+        if (points.length < 2)
+            return 0
+
+        pBrush := this.GetSavedOrCreateSolidBrush(color)
+        pStrokeStyle := this.GetSavedOrCreateStrokeStyle(strokeCapStyle, strokeShapeStyle)
+
+        loop points.length - 1 {
+            this.ID2D1RenderTarget.DrawLine(points[A_Index], points[A_Index + 1], pBrush, strokeWidth, pStrokeStyle)
+        }
+
+        if close
+            this.ID2D1RenderTarget.DrawLine(points[points.length], points[1], pBrush, strokeWidth, pStrokeStyle)
+    }
+
+    DrawGeometry(points, color, strokeWidth := 2, strokeCapStyle := 2, strokeShapeStyle := 0) {
+        if (points.length < 3)
+            return 0
+
+        pBrush := this.GetSavedOrCreateSolidBrush(color)
+        pStrokeStyle := this.GetSavedOrCreateStrokeStyle(strokeCapStyle, strokeShapeStyle)
+        pGeometrySink := Direct2D.ID2D1GeometrySink.Init()
+        Direct2D.ID2D1GeometrySink.BeginFigure(points[1], 1) ; D2D1_FIGURE_BEGIN_FILLED
+        loop points.length - 1
+            Direct2D.ID2D1GeometrySink.AddLine(points[A_Index + 1])
+        Direct2D.ID2D1GeometrySink.EndFigure(1) ; D2D1_FIGURE_END_CLOSED
+        Direct2D.ID2D1GeometrySink.Close()
+
+        this.pPathGeometry := Direct2D.ID2D1GeometrySink.GetPathGeometry()
+        this.ID2D1RenderTarget.DrawGeometry(this.pPathGeometry, pBrush, strokeWidth, pStrokeStyle)
+        Direct2D.release(pGeometrySink)
+    }
+
+    FillGeometry(points, color) {
+        if (points.length < 3)
+            return 0
+
+        pBrush := this.GetSavedOrCreateSolidBrush(color)
+        pGeometrySink := Direct2D.ID2D1GeometrySink.Init()
+        Direct2D.ID2D1GeometrySink.BeginFigure(points[1], 1) ; D2D1_FIGURE_BEGIN_FILLED
+        loop points.length - 1
+            Direct2D.ID2D1GeometrySink.AddLine(points[A_Index + 1])
+        Direct2D.ID2D1GeometrySink.EndFigure(1) ; D2D1_FIGURE_END_CLOSED
+        Direct2D.ID2D1GeometrySink.Close()
+
+        this.pPathGeometry := Direct2D.ID2D1GeometrySink.GetPathGeometry()
+        this.ID2D1RenderTarget.FillGeometry(this.pPathGeometry, pBrush)
+        Direct2D.release(pGeometrySink)
     }
 
     DrawRectangle(x, y, w, h, color, strokeWidth := 2, strokeCapStyle := 0, strokeShapeStyle := 0) {
