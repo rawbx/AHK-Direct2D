@@ -23,6 +23,7 @@ class Direct2D {
         this.gdipToken := this.GdipStartUp() ; to get image bitmap info
 
         this.isDrawing := 0
+        this.clipDepth := 0
         this.textFormats := Map()
         this.solidBrushes := Map()
         this.strokeStyles := Map()
@@ -55,6 +56,9 @@ class Direct2D {
             Direct2D.release(pStrokeStyle)
         for _, pGradientStops in this.gradientStops
             Direct2D.release(pGradientStops)
+        for _, pBitmap in this.d2dBitmaps
+            if pBitmap
+                Direct2D.release(pBitmap)
 
         this.IDWriteFactory.__Delete(), this.IDWriteFactory := ""
         this.ID2D1Factory.__Delete(), this.ID2D1Factory := ""
@@ -64,9 +68,23 @@ class Direct2D {
     }
 
     static isX64 := A_PtrSize == 8
+    static DWRITE_READING_DIRECTION_LEFT_TO_RIGHT := 0
+    static DWRITE_READING_DIRECTION_RIGHT_TO_LEFT := 1
+    static DWRITE_READING_DIRECTION_TOP_TO_BOTTOM := 2
+    static DWRITE_READING_DIRECTION_BOTTOM_TO_TOP := 3
+    static DWRITE_FLOW_DIRECTION_TOP_TO_BOTTOM := 0
+    static DWRITE_FLOW_DIRECTION_BOTTOM_TO_TOP := 1
+    static DWRITE_FLOW_DIRECTION_LEFT_TO_RIGHT := 2
+    static DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT := 3
+    static D2DERR_RECREATE_TARGET := 0x8899000C
     static vTable(p, i) => (v := NumGet(p + 0, 0, "ptr")) ? NumGet(v + 0, i * A_PtrSize, "Ptr") : 0
     static release(p) => (r := this.vTable(p, 2)) ? DllCall(r, "ptr", p) : 0
     static str2guid(guid) => (clsid := Buffer(16, 0), DllCall("ole32\CLSIDFromString", "WStr", guid, "Ptr", clsid), clsid)
+    static IsRecreateTarget(hr) => (hr & 0xFFFFFFFF) == this.D2DERR_RECREATE_TARGET
+
+    static ThrowHResult(operation, hr) {
+        throw Error(Format("{} failed (HRESULT 0x{:08X})", operation, hr & 0xFFFFFFFF))
+    }
     static guid := Map(
         'REFIID_D2DFactory',  Direct2D.str2guid('{06152247-6f50-465a-9245-118bfd3b6007}'),
         'REFIID_DWriteFactory',  Direct2D.str2guid('{B859EE5A-D838-4B5B-A2E8-1ADC7D93DB48}'),
@@ -222,8 +240,22 @@ class Direct2D {
                 Direct2D.release(this.pWF)
         }
 
-        CreateTextFormat(fontName, fontSize, fontWeight, fontStyle) =>
-            (DllCall(this.VT_CreateTextFormat, "ptr", this.pWF,
+        CreateTextFormat(fontName, fontSize, fontWeight := 400, fontStyle := 0, options := 0) {
+            local readingDirection := this.GetOption(options, "reading_direction", 0)
+            local flowDirection := this.GetOption(options, "flow_direction", 0)
+            local textAlignment := this.GetOption(options, "text_alignment", 0)
+            local paragraphAlignment := this.GetOption(options, "paragraph_alignment", 0)
+            local pTextFormat := 0
+            local hr
+
+            this.ValidateTextFormatOptions(
+                readingDirection,
+                flowDirection,
+                textAlignment,
+                paragraphAlignment
+            )
+
+            hr := DllCall(this.VT_CreateTextFormat, "ptr", this.pWF,
                 "wstr", fontName,
                 "ptr", 0, ; fontCollection
                 "uint", fontWeight, ; DWRITE_FONT_WEIGHT_NORMAL
@@ -231,50 +263,187 @@ class Direct2D {
                 "uint", 5, ; DWRITE_FONT_STRETCH_NORMAL
                 "float", fontSize,
                 "wstr", "en-us",
-                "Ptr*", &pTextFormat := 0
-            ), pTextFormat)
+                "Ptr*", &pTextFormat,
+                "hresult"
+            )
+            if hr != 0
+                Direct2D.ThrowHResult("CreateTextFormat", hr)
 
-        CreateTextLayout(text, pTextFormat) =>
-            (DllCall(this.VT_CreateTextLayout, "ptr", this.pWF,
+            try {
+                this.ApplyTextFormatOption(pTextFormat, 3, "text alignment", textAlignment)
+                this.ApplyTextFormatOption(pTextFormat, 4, "paragraph alignment", paragraphAlignment)
+                this.ApplyTextFormatOption(pTextFormat, 6, "reading direction", readingDirection)
+                this.ApplyTextFormatOption(pTextFormat, 7, "flow direction", flowDirection)
+            } catch as exception {
+                Direct2D.release(pTextFormat)
+                throw exception
+            }
+            return pTextFormat
+        }
+
+        CreateTextLayout(text, pTextFormat, maxWidth := A_ScreenWidth, maxHeight := A_ScreenHeight, options := 0) {
+            local readingDirection := this.GetOption(options, "reading_direction", 0)
+            local flowDirection := this.GetOption(options, "flow_direction", 0)
+            local pTextLayout := 0
+            local hr := DllCall(this.VT_CreateTextLayout, "ptr", this.pWF,
                 "wstr", text,
                 "uint", StrLen(text),
                 "ptr", pTextFormat,
-                "float", A_ScreenWidth,  ; maxWidth
-                "float", A_ScreenHeight,  ; maxHeight
-                "ptr*", &pTextLayout := 0,
-                "uint"
-            ), pTextLayout)
+                "float", maxWidth,
+                "float", maxHeight,
+                "ptr*", &pTextLayout,
+                "hresult"
+            )
+            if hr != 0
+                Direct2D.ThrowHResult("CreateTextLayout", hr)
+            try {
+                this.ValidateTextFormatOptions(readingDirection, flowDirection, 0, 0)
+                this.ApplyTextFormatOption(pTextLayout, 6, "layout reading direction", readingDirection)
+                this.ApplyTextFormatOption(pTextLayout, 7, "layout flow direction", flowDirection)
+            } catch as exception {
+                Direct2D.release(pTextLayout)
+                throw exception
+            }
+            return pTextLayout
+        }
+
+        GetTextLayoutMetrics(pTextLayout, textMetricPrps) {
+            local hr := DllCall(Direct2D.vTable(pTextLayout, 60), ; IDWriteTextLayout::GetMetrics
+                "ptr", pTextLayout,
+                "ptr", textMetricPrps,
+                "hresult"
+            )
+            if hr != 0
+                Direct2D.ThrowHResult("GetTextLayoutMetrics", hr)
+
+            return {
+                left: NumGet(textMetricPrps, 0, "float"),
+                top: NumGet(textMetricPrps, 4, "float"),
+                width: NumGet(textMetricPrps, 8, "float"),
+                width_including_trailing_whitespace: NumGet(textMetricPrps, 12, "float"),
+                height: NumGet(textMetricPrps, 16, "float"),
+                layout_width: NumGet(textMetricPrps, 20, "float"),
+                layout_height: NumGet(textMetricPrps, 24, "float"),
+                max_bidi_reordering_depth: NumGet(textMetricPrps, 28, "uint"),
+                line_count: NumGet(textMetricPrps, 32, "uint")
+            }
+        }
+
+        GetTextLayoutLineMetrics(pTextLayout, textMetricPrps) {
+            local textMetrics := this.GetTextLayoutMetrics(pTextLayout, textMetricPrps)
+            local lineCount := textMetrics.line_count
+            local lineMetrics := []
+            local lineMetricPrps
+            local actualLineCount := 0
+            local hr
+
+            if lineCount <= 0
+                return lineMetrics
+
+            ; DWRITE_LINE_METRICS is three UINT32 values, two FLOAT values, and one BOOL.
+            lineMetricPrps := Buffer(lineCount * 24, 0)
+            hr := DllCall(Direct2D.vTable(pTextLayout, 59), ; IDWriteTextLayout::GetLineMetrics
+                "ptr", pTextLayout,
+                "ptr", lineMetricPrps,
+                "uint", lineCount,
+                "uint*", &actualLineCount,
+                "hresult"
+            )
+            if hr != 0
+                Direct2D.ThrowHResult("GetTextLayoutLineMetrics", hr)
+
+            Loop actualLineCount {
+                local offset := (A_Index - 1) * 24
+                lineMetrics.Push({
+                    length: NumGet(lineMetricPrps, offset, "uint"),
+                    trailing_whitespace_length: NumGet(lineMetricPrps, offset + 4, "uint"),
+                    newline_length: NumGet(lineMetricPrps, offset + 8, "uint"),
+                    height: NumGet(lineMetricPrps, offset + 12, "float"),
+                    baseline: NumGet(lineMetricPrps, offset + 16, "float"),
+                    is_trimmed: NumGet(lineMetricPrps, offset + 20, "int") != 0
+                })
+            }
+            return lineMetrics
+        }
+
+        GetOption(options, name, fallback) {
+            if !options
+                return fallback
+            if !IsObject(options)
+                throw TypeError("Text format options must be an object or 0.")
+            if options is Map
+                return options.Has(name) ? options[name] : fallback
+            return HasProp(options, name) ? options.%name% : fallback
+        }
+
+        ValidateTextFormatOptions(readingDirection, flowDirection, textAlignment, paragraphAlignment) {
+            if !IsInteger(readingDirection) || readingDirection < 0 || readingDirection > 3
+                throw ValueError("reading_direction must be a DirectWrite reading direction.")
+            if !IsInteger(flowDirection) || flowDirection < 0 || flowDirection > 3
+                throw ValueError("flow_direction must be a DirectWrite flow direction.")
+            if !IsInteger(textAlignment) || textAlignment < 0 || textAlignment > 3
+                throw ValueError("text_alignment must be a DirectWrite text alignment.")
+            if !IsInteger(paragraphAlignment) || paragraphAlignment < 0 || paragraphAlignment > 2
+                throw ValueError("paragraph_alignment must be a DirectWrite paragraph alignment.")
+
+            readingIsVertical := readingDirection >= 2
+            flowIsVertical := flowDirection <= 1
+            if readingIsVertical == flowIsVertical
+                throw ValueError("reading_direction and flow_direction conflict.")
+        }
+
+        ApplyTextFormatOption(pTextFormat, vtableIndex, optionName, value) {
+            if !value
+                return
+            local hr := DllCall(Direct2D.vTable(pTextFormat, vtableIndex),
+                "ptr", pTextFormat,
+                "uint", value,
+                "hresult"
+            )
+            if hr != 0
+                Direct2D.ThrowHResult("Set" . optionName, hr)
+        }
+    }
+
+    CreateTextFormat(fontName, fontSize, fontWeight := 400, fontStyle := 0, options := 0) {
+        return this.IDWriteFactory.CreateTextFormat(fontName, fontSize, fontWeight, fontStyle, options)
+    }
+
+    CreateTextLayout(text, pTextFormat, maxWidth := A_ScreenWidth, maxHeight := A_ScreenHeight, options := 0) {
+        return this.IDWriteFactory.CreateTextLayout(text, pTextFormat, maxWidth, maxHeight, options)
+    }
+
+    GetTextLayoutMetrics(pTextLayout) {
+        return this.IDWriteFactory.GetTextLayoutMetrics(pTextLayout, this.textMetricPrps)
+    }
+
+    GetTextLayoutLineMetrics(pTextLayout) {
+        return this.IDWriteFactory.GetTextLayoutLineMetrics(pTextLayout, this.textMetricPrps)
     }
 
     ; GetMetrics for the formatted text.
     ; https://learn.microsoft.com/windows/win32/api/dwrite/ns-dwrite-dwrite_text_metrics
-    GetMetrics(text, fontName := "Segoe UI", fontSize := 16, fontWeight := 400, fontStyle := 0) {
-        pTextFormat := this.GetSavedOrCreateTextFormat(fontName, fontSize, fontWeight, fontStyle)
-        pTextLayout := this.IDWriteFactory.CreateTextLayout(text, pTextFormat)
-        ; struct DWRITE_TEXT_METRICS {
-        ;     FLOAT left;
-        ;     FLOAT top;
-        ;     FLOAT width;
-        ;     FLOAT widthIncludingTrailingWhitespace;
-        ;     FLOAT height;
-        ;     FLOAT layoutWidth;
-        ;     FLOAT layoutHeight;
-        ;     UINT32 maxBidiReorderingDepth;
-        ;     UINT32 lineCount;
-        ; };
-        if DllCall(Direct2D.vTable(pTextLayout, 60), ;IDWriteTextLayout::GetMetrics
-            "ptr", pTextLayout,
-            "ptr", this.textMetricPrps,
-            "uint"
-        ) != 0
-            throw Error("GetMetrics failed")
-
-        width := NumGet(this.textMetricPrps, 8, "float")
-        height := NumGet(this.textMetricPrps, 16, "float")
-
-        Direct2D.release(pTextLayout)
-        ; Direct2D.release(pTextFormat) ; pTextFormat will release in map
-        return { w: width, h: height }
+    GetMetrics(text, fontName := "Segoe UI", fontSize := 16, fontWeight := 400, fontStyle := 0, options := 0) {
+        local pTextFormat := this.GetSavedOrCreateTextFormat(
+            fontName,
+            fontSize,
+            fontWeight,
+            fontStyle,
+            this.GetTextFormatOption(options, "text_alignment", 0),
+            this.GetTextFormatOption(options, "paragraph_alignment", 0),
+            this.GetTextFormatOption(options, "reading_direction", 0),
+            this.GetTextFormatOption(options, "flow_direction", 0)
+        )
+        local pTextLayout := this.CreateTextLayout(text, pTextFormat, A_ScreenWidth, A_ScreenHeight, Map(
+            "reading_direction", this.GetTextFormatOption(options, "reading_direction", 0),
+            "flow_direction", this.GetTextFormatOption(options, "flow_direction", 0)
+        ))
+        try {
+            local metrics := this.GetTextLayoutMetrics(pTextLayout)
+            return { w: metrics.width, h: metrics.height }
+        } finally {
+            Direct2D.release(pTextLayout)
+        }
     }
 
     class ID2D1GeometrySink {
@@ -404,6 +573,8 @@ class Direct2D {
             this.VT_SetTransform := Direct2D.vTable(this.pRT, 30)
             this.VT_SetAntialiasMode := Direct2D.vTable(this.pRT, 32)
             this.VT_SetTextAntialiasMode := Direct2D.vTable(this.pRT, 34)
+            this.VT_PushAxisAlignedClip := Direct2D.vTable(this.pRT, 45)
+            this.VT_PopAxisAlignedClip := Direct2D.vTable(this.pRT, 46)
             this.VT_Clear := Direct2D.vTable(this.pRT, 47)
             this.VT_BeginDraw := Direct2D.vTable(this.pRT, 48)
             this.VT_EndDraw := Direct2D.vTable(this.pRT, 49)
@@ -514,9 +685,10 @@ class Direct2D {
 
         DrawTextLayout(point, pTextLayout, pBrush, drawOpt) {
             if Direct2D.isX64 {
-                NumPut('float', point[1], this.drawInfoPrps, 0)
-                NumPut('float', point[2], this.drawInfoPrps, 4)
-                DllCall(this.VT_DrawTextLayout, "ptr", this.pRT, 'double', NumGet(this.drawInfoPrps, 0, 'double'), "ptr", pTextLayout, 'ptr', pBrush, "uint", drawOpt)
+                static pointPrps := Buffer(8, 0)
+                NumPut('float', point[1], pointPrps, 0)
+                NumPut('float', point[2], pointPrps, 4)
+                DllCall(this.VT_DrawTextLayout, "ptr", this.pRT, 'double', NumGet(pointPrps, 0, 'double'), "ptr", pTextLayout, 'ptr', pBrush, "uint", drawOpt)
             } else {
                 DllCall(this.VT_DrawTextLayout, "ptr", this.pRT, "float", point[1], "float", point[2], "ptr", pTextLayout, 'ptr', pBrush, "uint", drawOpt)
             }
@@ -532,7 +704,13 @@ class Direct2D {
 
         BeginDraw() => DllCall(this.VT_BeginDraw, "Ptr", this.pRT)
 
-        EndDraw() => DllCall(this.VT_EndDraw, "Ptr", this.pRT, "Ptr*", 0, "Ptr*", 0)
+        EndDraw(&tag1 := 0, &tag2 := 0) =>
+            DllCall(this.VT_EndDraw, "Ptr", this.pRT, "UInt64*", &tag1, "UInt64*", &tag2, "hresult")
+
+        PushAxisAlignedClip(rect, antialiasMode := 0) =>
+            DllCall(this.VT_PushAxisAlignedClip, "Ptr", this.pRT, "Ptr", rect, "UInt", antialiasMode)
+
+        PopAxisAlignedClip() => DllCall(this.VT_PopAxisAlignedClip, "Ptr", this.pRT)
 
         Resize(size) => DllCall(this.VT_Resize, "Ptr", this.pRT, "ptr", size)
     }
@@ -716,6 +894,7 @@ class Direct2D {
     SetRenderTarget(target, w := 0, h := 0) {
         this.target := target, this.hwnd := 0, this.attachHwnd := 0
         this.x := 0, this.y := 0, this.width := w, this.height := h
+        this.clipDepth := 0
         this.winRect := []
         if target && IsInteger(target) {
             this.hwnd := target
@@ -856,8 +1035,21 @@ class Direct2D {
     }
 
     EndDraw() {
-        if (this.isDrawing)
-            this.ID2D1RenderTarget.EndDraw()
+        if !this.isDrawing
+            return 0
+        local clipDepth := this.clipDepth
+        local tag1 := 0
+        local tag2 := 0
+        local hr
+        try {
+            hr := this.ID2D1RenderTarget.EndDraw(&tag1, &tag2)
+        } finally {
+            this.isDrawing := 0
+            this.clipDepth := 0
+        }
+        if clipDepth
+            throw Error(Format("EndDraw called with {} unclosed axis-aligned clip(s).", clipDepth))
+        return hr
     }
 
     Clear() {
@@ -867,10 +1059,35 @@ class Direct2D {
     }
 
     ResizeRenderTarget(w, h) {
+        if !HasProp(this.ID2D1RenderTarget, "VT_Resize") || !this.ID2D1RenderTarget.VT_Resize
+            throw Error("The current render target does not support ResizeRenderTarget.")
         static D2D1_SIZE_U := Buffer(16, 0)
         NumPut("uint", w, D2D1_SIZE_U, 0)
         NumPut("uint", h, D2D1_SIZE_U, 4)
-        this.ID2D1RenderTarget.Resize(D2D1_SIZE_U)
+        local hr := this.ID2D1RenderTarget.Resize(D2D1_SIZE_U)
+        if hr = 0
+            this.width := w, this.height := h
+        return hr
+    }
+
+    GetRenderTargetSize() {
+        return { width: this.width, height: this.height }
+    }
+
+    PushAxisAlignedClip(x, y, w, h, antialiasMode := 0) {
+        NumPut("float", x, this.drawBoundsPrps, 0)
+        NumPut("float", y, this.drawBoundsPrps, 4)
+        NumPut("float", x + w, this.drawBoundsPrps, 8)
+        NumPut("float", y + h, this.drawBoundsPrps, 12)
+        this.ID2D1RenderTarget.PushAxisAlignedClip(this.drawBoundsPrps, antialiasMode)
+        return ++this.clipDepth
+    }
+
+    PopAxisAlignedClip() {
+        if this.clipDepth <= 0
+            throw Error("PopAxisAlignedClip called without a matching PushAxisAlignedClip.")
+        this.ID2D1RenderTarget.PopAxisAlignedClip()
+        return --this.clipDepth
     }
 
     CreateLinearGradientBrush(startX, startY, endX, endY, gdColors) {
@@ -916,7 +1133,16 @@ class Direct2D {
      */
     DrawText(text, x, y, fontSize, color, fontName, w?, h?, fontOpt?, drawShadow := 0, drawOpt := 4) {
         fontOpt ?? fontOpt := { fontWeight: 400, fontStyle: 0, horizonAlign: 0, verticalAlign: 0 }
-        pTextFormat := this.GetSavedOrCreateTextFormat(fontName, fontSize, fontOpt.fontWeight, fontOpt.fontStyle, fontOpt.horizonAlign, fontOpt.verticalAlign)
+        pTextFormat := this.GetSavedOrCreateTextFormat(
+            fontName,
+            fontSize,
+            this.GetTextFormatOption(fontOpt, "fontWeight", 400),
+            this.GetTextFormatOption(fontOpt, "fontStyle", 0),
+            this.GetTextFormatOption(fontOpt, "horizonAlign", 0),
+            this.GetTextFormatOption(fontOpt, "verticalAlign", 0),
+            this.GetTextFormatOption(fontOpt, "readingDirection", 0),
+            this.GetTextFormatOption(fontOpt, "flowDirection", 0)
+        )
         pBrushText := this.GetSavedOrCreateSolidBrush(color)
 
         NumPut("float", x + (w ?? this.width), this.drawBoundsPrps, 8)
@@ -943,13 +1169,44 @@ class Direct2D {
     }
 
     DrawTextLayout(text, x, y, color, pTextLayout, drawOpt := 4) {
-        if !text
+        if !text {
+            Direct2D.release(pTextLayout)
             return
+        }
 
         pBrush := this.GetSavedOrCreateSolidBrush(color)
-        this.ID2D1RenderTarget.DrawTextLayout([x, y], pTextLayout, pBrush, drawOpt)
+        try {
+            this.ID2D1RenderTarget.DrawTextLayout([x, y], pTextLayout, pBrush, drawOpt)
+        } finally {
+            Direct2D.release(pTextLayout)
+        }
+    }
 
-        Direct2D.release(pTextLayout)
+    DrawTextWithLayout(text, x, y, fontSize, color, fontName, w?, h?, fontOpt?, drawOpt := 4) {
+        if !text {
+            return
+        }
+        fontOpt ?? fontOpt := { fontWeight: 400, fontStyle: 0, horizonAlign: 0, verticalAlign: 0 }
+        local readingDirection := this.GetTextFormatOption(fontOpt, "readingDirection", 0)
+        local flowDirection := this.GetTextFormatOption(fontOpt, "flowDirection", 0)
+        local pTextFormat := this.GetSavedOrCreateTextFormat(
+            fontName,
+            fontSize,
+            this.GetTextFormatOption(fontOpt, "fontWeight", 400),
+            this.GetTextFormatOption(fontOpt, "fontStyle", 0),
+            this.GetTextFormatOption(fontOpt, "horizonAlign", 0),
+            this.GetTextFormatOption(fontOpt, "verticalAlign", 0),
+            readingDirection,
+            flowDirection
+        )
+        local pTextLayout := this.CreateTextLayout(
+            text,
+            pTextFormat,
+            w ?? this.width,
+            h ?? this.height,
+            Map("reading_direction", readingDirection, "flow_direction", flowDirection)
+        )
+        this.DrawTextLayout(text, x, y, color, pTextLayout, drawOpt)
     }
 
     /**
@@ -1275,17 +1532,53 @@ class Direct2D {
         return this.d2dBitmaps[imgPath] := pD2dBitmap
     }
 
-    GetSavedOrCreateTextFormat(fontName, fontSize, fontWeight := 400, fontStyle := 0, horizonAlign := 0, verticalAlign := 0) {
-        fK := Format("{}_{}_{}_{}", fontName, fontSize, fontWeight, fontStyle)
+    GetSavedOrCreateTextFormat(
+        fontName,
+        fontSize,
+        fontWeight := 400,
+        fontStyle := 0,
+        horizonAlign := 0,
+        verticalAlign := 0,
+        readingDirection := 0,
+        flowDirection := 0
+    ) {
+        fK := Format(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            fontName,
+            fontSize,
+            fontWeight,
+            fontStyle,
+            horizonAlign,
+            verticalAlign,
+            readingDirection,
+            flowDirection
+        )
         if this.textFormats.Has(fK)
             return this.textFormats[fK]
 
-        pTextFormat := this.IDWriteFactory.CreateTextFormat(fontName, fontSize, fontWeight, fontStyle)
-        if horizonAlign
-            DllCall(Direct2D.vTable(pTextFormat, 3), "Ptr", pTextFormat, "uint", horizonAlign)
-        if verticalAlign
-            DllCall(Direct2D.vTable(pTextFormat, 4), "Ptr", pTextFormat, "uint", verticalAlign)
+        pTextFormat := this.IDWriteFactory.CreateTextFormat(
+            fontName,
+            fontSize,
+            fontWeight,
+            fontStyle,
+            Map(
+                "text_alignment", horizonAlign,
+                "paragraph_alignment", verticalAlign,
+                "reading_direction", readingDirection,
+                "flow_direction", flowDirection
+            )
+        )
         return this.textFormats[fK] := pTextFormat
+    }
+
+    GetTextFormatOption(options, name, fallback) {
+        if !options
+            return fallback
+        if !IsObject(options)
+            throw TypeError("Text format options must be an object or 0.")
+        if options is Map
+            return options.Has(name) ? options[name] : fallback
+        return HasProp(options, name) ? options.%name% : fallback
     }
 
     GetSavedOrCreateSolidBrush(c) {
@@ -1348,7 +1641,7 @@ class Direct2D {
 
         this.x := x, this.y := y
         if w != 0 and h != 0
-            this.ResizeRenderTarget(this.width := w, this.height := h)
+            this.ResizeRenderTarget(w, h)
         this.winRect := [x, y, x + this.width, y + this.height]
         DllCall("MoveWindow", "Uptr", this.hwnd, "int", x, "int", y, "int", this.width, "int", this.height, "char", 1)
     }
